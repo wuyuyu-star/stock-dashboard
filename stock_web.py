@@ -59,18 +59,25 @@ def save_watchlist(lst):
     with open(WATCHLIST_FILE, "w") as f:
         json.dump(lst, f)
 
+def make_session():
+    try:
+        from curl_cffi import requests as curl_requests
+        return curl_requests.Session(impersonate="chrome")
+    except ImportError:
+        return None
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_info(symbol):
-    t = yf.Ticker(symbol)
+    t = yf.Ticker(symbol, session=make_session())
     return t.info
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_history(symbol, period):
-    return yf.Ticker(symbol).history(period=period)
+    return yf.Ticker(symbol, session=make_session()).history(period=period)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_financials(symbol):
-    t = yf.Ticker(symbol)
+    t = yf.Ticker(symbol, session=make_session())
     return t.quarterly_income_stmt, t.quarterly_balance_sheet
 
 @st.cache_data(ttl=600, show_spinner=False)
