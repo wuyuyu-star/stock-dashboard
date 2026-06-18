@@ -119,9 +119,10 @@ def fetch_options_dates(symbol):
 def fetch_options_chain(symbol, date):
     try:
         t = yf.Ticker(symbol, session=make_session())
-        return t.option_chain(date)
+        chain = t.option_chain(date)
+        return chain.calls, chain.puts
     except Exception:
-        return None
+        return None, None
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_news(symbol):
@@ -590,21 +591,21 @@ with tab_opt:
     dates = fetch_options_dates(query)
     if dates:
         selected_date = st.selectbox("到期日", dates[:8])
-        chain = fetch_options_chain(query, selected_date)
-        if chain:
+        calls, puts = fetch_options_chain(query, selected_date)
+        if calls is not None:
             col_opt1, col_opt2 = st.columns(2)
             with col_opt1:
                 st.write("**看涨期权 (Calls)**")
-                calls = chain.calls[["strike","lastPrice","bid","ask","volume","openInterest","impliedVolatility"]].head(15)
-                calls.columns = ["行权价","最新价","买价","卖价","成交量","持仓量","隐波"]
-                calls["隐波"] = calls["隐波"].apply(lambda x: f"{x*100:.1f}%")
-                st.dataframe(calls, use_container_width=True)
+                df_calls = calls[["strike","lastPrice","bid","ask","volume","openInterest","impliedVolatility"]].head(15).copy()
+                df_calls.columns = ["行权价","最新价","买价","卖价","成交量","持仓量","隐波"]
+                df_calls["隐波"] = df_calls["隐波"].apply(lambda x: f"{x*100:.1f}%")
+                st.dataframe(df_calls, use_container_width=True)
             with col_opt2:
                 st.write("**看跌期权 (Puts)**")
-                puts = chain.puts[["strike","lastPrice","bid","ask","volume","openInterest","impliedVolatility"]].head(15)
-                puts.columns = ["行权价","最新价","买价","卖价","成交量","持仓量","隐波"]
-                puts["隐波"] = puts["隐波"].apply(lambda x: f"{x*100:.1f}%")
-                st.dataframe(puts, use_container_width=True)
+                df_puts = puts[["strike","lastPrice","bid","ask","volume","openInterest","impliedVolatility"]].head(15).copy()
+                df_puts.columns = ["行权价","最新价","买价","卖价","成交量","持仓量","隐波"]
+                df_puts["隐波"] = df_puts["隐波"].apply(lambda x: f"{x*100:.1f}%")
+                st.dataframe(df_puts, use_container_width=True)
     else:
         st.info("暂无期权数据")
 
