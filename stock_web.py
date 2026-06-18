@@ -108,11 +108,25 @@ def to_excel(dfs: dict) -> bytes:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_info(symbol):
-    return yf.Ticker(symbol, session=make_session()).info
+    for attempt in range(3):
+        try:
+            return yf.Ticker(symbol, session=make_session()).info
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+            else:
+                raise e
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_history(symbol, period):
-    return yf.Ticker(symbol, session=make_session()).history(period=period)
+    for attempt in range(3):
+        try:
+            return yf.Ticker(symbol, session=make_session()).history(period=period)
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+            else:
+                raise e
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_financials(symbol):
