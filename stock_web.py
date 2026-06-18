@@ -503,7 +503,7 @@ with tab_score:
                              {"range":[7,10],"color":"#e8f8f5"}]}))
         fig_g.update_layout(height=200,margin=dict(l=20,r=20,t=10,b=10),
                              paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig_g, use_container_width=True)
+        st.plotly_chart(fig_g, use_container_width=True, key="gauge_valuation")
         for desc,pts in v_det:
             st.write(f"{'✅' if pts!='0' else '➖'} {desc}  `{pts}`")
 
@@ -518,7 +518,7 @@ with tab_score:
                              {"range":[7,10],"color":"#e8f8f5"}]}))
         fig_g2.update_layout(height=200,margin=dict(l=20,r=20,t=10,b=10),
                               paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig_g2, use_container_width=True)
+        st.plotly_chart(fig_g2, use_container_width=True, key="gauge_health")
         for desc,pts in h_det:
             st.write(f"{'✅' if pts!='0' else '➖'} {desc}  `{pts}`")
 
