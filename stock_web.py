@@ -110,10 +110,22 @@ def to_excel(dfs: dict) -> bytes:
 def fetch_info(symbol):
     for attempt in range(3):
         try:
-            return yf.Ticker(symbol, session=make_session()).info
+            t = yf.Ticker(symbol, session=make_session())
+            info = t.info
+            # 补充 fast_info 里的实时价格（更快更稳定）
+            try:
+                fi = t.fast_info
+                if fi:
+                    info["currentPrice"]    = getattr(fi, "last_price", info.get("currentPrice"))
+                    info["previousClose"]   = getattr(fi, "previous_close", info.get("previousClose"))
+                    info["volume"]          = getattr(fi, "three_month_average_volume", info.get("volume"))
+                    info["marketCap"]       = getattr(fi, "market_cap", info.get("marketCap"))
+            except Exception:
+                pass
+            return info
         except Exception as e:
             if attempt < 2:
-                time.sleep(2 + attempt * 2)
+                time.sleep(3 + attempt * 3)
             else:
                 raise e
 
