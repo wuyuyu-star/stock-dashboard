@@ -29,8 +29,6 @@ PEERS = {
     "AMD":  ["NVDA", "INTC", "QCOM", "TSM"],
 }
 
-INDICES = {"道琼斯":"DJI","纳斯达克":"COMP","标普500":"SPX","恐慌指数":"VIX"}
-
 # ── 页面配置 ──────────────────────────────────
 st.set_page_config(page_title="美股看板", page_icon="📈", layout="wide")
 st.markdown("""
@@ -45,31 +43,33 @@ footer { visibility: hidden; }
 
 # ── API Key ───────────────────────────────────
 try:
-    AV_KEY = st.secrets["AV_API_KEY"]
+    TD_KEY = st.secrets["TWELVE_API_KEY"]
 except Exception:
-    AV_KEY = ""
+    TD_KEY = ""
 
-AV = "https://www.alphavantage.co/query"
+TD = "https://api.twelvedata.com"
 
 # ── 工具函数 ──────────────────────────────────
 
 def fmt(n):
-    if n is None or (isinstance(n, float) and pd.isna(n)): return "N/A"
+    if n is None: return "N/A"
     try: n = float(n)
     except: return "N/A"
+    if pd.isna(n): return "N/A"
     if abs(n) >= 1e12: return f"{n/1e12:.2f}T"
     if abs(n) >= 1e9:  return f"{n/1e9:.2f}B"
     if abs(n) >= 1e6:  return f"{n/1e6:.2f}M"
-    return f"{n:,.0f}"
+    return f"{n:,.2f}"
 
 def fv(d, key, default=None):
     v = d.get(key, default)
-    try: return float(v) if v not in (None,"None","N/A","-") else default
+    try: return float(v) if v not in (None,"None","N/A","","--") else default
     except: return default
 
 def fmt_pct(v):
     if v is None: return "N/A"
-    return f"{v*100:.2f}%"
+    try: return f"{float(v)*100:.2f}%"
+    except: return str(v)
 
 def is_market_open():
     et = timezone(timedelta(hours=-4))
@@ -77,10 +77,11 @@ def is_market_open():
     if now.weekday() >= 5: return False
     return now.replace(hour=9,minute=30,second=0) <= now <= now.replace(hour=16,minute=0,second=0)
 
-def av_get(params):
-    params["apikey"] = AV_KEY
+def td_get(endpoint, params=None):
+    p = {"apikey": TD_KEY}
+    if params: p.update(params)
     try:
-        r = requests.get(AV, params=params, timeout=10)
+        r = requests.get(f"{TD}{endpoint}", params=p, timeout=10)
         return r.json()
     except Exception:
         return {}
@@ -104,43 +105,56 @@ def to_excel(dfs: dict) -> bytes:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_quote(symbol):
-    data = av_get({"function":"GLOBAL_QUOTE","symbol":symbol})
-    return data.get("Global Quote", {})
+    return td_get("/price", {"symbol": symbol})
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_quote_full(symbol):
+    return td_get("/quote", {"symbol": symbol})
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_overview(symbol):
-    return av_get({"function":"OVERVIEW","symbol":symbol})
+def fetch_profile(symbol):
+    return td_get("/profile", {"symbol": symbol})
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_history(symbol, outputsize="compact"):
-    data = av_get({"function":"TIME_SERIES_DAILY_ADJUSTED",
-                   "symbol":symbol, "outputsize":outputsize})
-    ts = data.get("Time Series (Daily)", {})
-    if not ts: return pd.DataFrame()
-    df = pd.DataFrame(ts).T
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
-    df.columns = ["Open","High","Low","Close","Adj Close","Volume","Div","Split"]
+def fetch_statistics(symbol):
+    return td_get("/statistics", {"symbol": symbol})
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_history(symbol, period="1year"):
+    period_map = {
+        "1mo": "1month", "3mo": "3month", "6mo": "6month",
+        "1year": "1year", "2year": "2year"
+    }
+    outputsize = 500
+    data = td_get("/time_series", {
+        "symbol": symbol, "interval": "1day",
+        "outputsize": outputsize, "order": "ASC"
+    })
+    if "values" not in data: return pd.DataFrame()
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime")
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.columns = [c.capitalize() for c in df.columns]
     return df
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_income(symbol):
-    data = av_get({"function":"INCOME_STATEMENT","symbol":symbol})
-    reports = data.get("annualReports", [])
+    data = td_get("/income_statement", {"symbol": symbol})
+    reports = data.get("income_statement", [])
     return pd.DataFrame(reports) if reports else pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_balance(symbol):
-    data = av_get({"function":"BALANCE_SHEET","symbol":symbol})
-    reports = data.get("annualReports", [])
+    data = td_get("/balance_sheet", {"symbol": symbol})
+    reports = data.get("balance_sheet", [])
     return pd.DataFrame(reports) if reports else pd.DataFrame()
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_news(symbol):
-    data = av_get({"function":"NEWS_SENTIMENT","tickers":symbol,"limit":"8"})
-    return data.get("feed", [])
+    data = td_get("/news", {"symbol": symbol, "outputsize": 8})
+    return data if isinstance(data, list) else []
 
 # ── 技术指标 ──────────────────────────────────
 
@@ -165,50 +179,55 @@ def calc_boll(series, period=20, std=2):
 
 # ── 评分 ─────────────────────────────────────
 
-def valuation_score(ov):
+def valuation_score(stats):
     score, details = 0, []
-    pe = fv(ov, "PERatio")
+    vs = stats.get("valuations_metrics", {})
+    pe = fv(vs, "trailing_pe")
     if pe and pe > 0:
         if pe < 15:   score+=2; details.append(("PE < 15，估值偏低","+2"))
         elif pe < 25: score+=1; details.append((f"PE {pe:.1f}，估值合理","+1"))
         else:         details.append((f"PE {pe:.1f}，估值偏高","0"))
-    pb = fv(ov, "PriceToBookRatio")
+    pb = fv(vs, "price_to_book_mrq")
     if pb and pb > 0:
         if pb < 1:   score+=2; details.append(("PB < 1，低于净资产","+2"))
         elif pb < 3: score+=1; details.append(("PB 1~3，合理","+1"))
         else:        details.append((f"PB {pb:.1f}，溢价较高","0"))
-    roe = fv(ov, "ReturnOnEquityTTM")
+    fm = stats.get("financials", {})
+    roe = fv(fm, "return_on_equity_ttm")
     if roe:
-        if roe > 0.2:  score+=2; details.append(("ROE > 20%，盈利能力强","+2"))
-        elif roe > 0.1: score+=1; details.append(("ROE 10~20%","+1"))
-        else:           details.append(("ROE < 10%，盈利能力弱","0"))
-    pm = fv(ov, "ProfitMargin")
+        if roe > 20:  score+=2; details.append(("ROE > 20%，盈利能力强","+2"))
+        elif roe > 10: score+=1; details.append(("ROE 10~20%","+1"))
+        else:          details.append(("ROE < 10%，盈利能力弱","0"))
+    pm = fv(fm, "net_profit_margin_ttm")
     if pm:
-        if pm > 0.2:  score+=2; details.append(("净利率 > 20%","+2"))
-        elif pm > 0.1: score+=1; details.append(("净利率 10~20%","+1"))
-        else:          details.append(("净利率 < 10%","0"))
+        if pm > 20:  score+=2; details.append(("净利率 > 20%","+2"))
+        elif pm > 10: score+=1; details.append(("净利率 10~20%","+1"))
+        else:         details.append(("净利率 < 10%","0"))
     return min(score,10), details
 
-def health_score(ov):
+def health_score(stats):
     score, details = 0, []
-    de = fv(ov, "DebtToEquityRatio")
+    fm = stats.get("financials", {})
+    bs = stats.get("balance_sheet", {})
+    de = fv(bs, "total_debt_to_equity_mrq")
     if de is not None:
-        if de < 0.5:  score+=2; details.append(("负债权益比 < 0.5，财务稳健","+2"))
-        elif de < 1:  score+=1; details.append(("负债权益比 0.5~1，一般","+1"))
-        else:         details.append((f"负债权益比 {de:.1f}，杠杆较高","0"))
-    cr = fv(ov, "CurrentRatio")
+        if de < 50:   score+=2; details.append(("负债权益比 < 50%，财务稳健","+2"))
+        elif de < 100: score+=1; details.append(("负债权益比 50~100%，一般","+1"))
+        else:          details.append((f"负债权益比 {de:.0f}%，杠杆较高","0"))
+    cr = fv(bs, "current_ratio_mrq")
     if cr:
         if cr > 2:   score+=2; details.append(("流动比率 > 2，短期偿债能力强","+2"))
         elif cr > 1: score+=1; details.append(("流动比率 1~2，可接受","+1"))
         else:        details.append(("流动比率 < 1，短期流动性风险","0"))
-    ocf = fv(ov, "OperatingCashflowTTM")
-    if ocf and ocf > 0: score+=2; details.append(("经营现金流为正","+2"))
-    elif ocf:           details.append(("经营现金流为负","0"))
-    rg = fv(ov, "QuarterlyRevenueGrowthYOY")
+    fcf = fv(fm, "free_cash_flow_ttm")
+    if fcf:
+        if fcf > 0: score+=2; details.append(("自由现金流为正","+2"))
+        else:       details.append(("自由现金流为负","0"))
+    rg = fv(fm, "revenue_growth_ttm_yoy")
     if rg is not None:
-        if rg > 0.15:  score+=2; details.append(("营收增速 > 15%","+2"))
-        elif rg > 0.05: score+=1; details.append(("营收增速 5~15%","+1"))
-        else:           details.append(("营收增速 < 5%","0"))
+        if rg > 15:  score+=2; details.append(("营收增速 > 15%","+2"))
+        elif rg > 5:  score+=1; details.append(("营收增速 5~15%","+1"))
+        else:         details.append(("营收增速 < 5%","0"))
     return min(score,10), details
 
 def score_color(s):
@@ -240,7 +259,7 @@ with st.sidebar:
     if not wl: st.caption("暂无自选股")
 
     st.divider()
-    period_map   = {"1个月":"compact","3个月":"compact","6个月":"full","1年":"full","2年":"full"}
+    period_map   = {"1个月":"1mo","3个月":"3mo","6个月":"6mo","1年":"1year","2年":"2year"}
     period_days  = {"1个月":30,"3个月":90,"6个月":180,"1年":365,"2年":730}
     period_label = st.radio("K线周期", list(period_map.keys()), index=3)
 
@@ -256,15 +275,14 @@ if is_market_open():
 
 # ── 大盘概览 ──────────────────────────────────
 st.subheader("大盘概览")
+indices = {"道琼斯":"DIA","纳斯达克":"QQQ","标普500":"SPY","恐慌指数":"VIXY"}
 idx_cols = st.columns(4)
-for i, (name, sym) in enumerate({"道琼斯":"DIA","纳斯达克":"QQQ",
-                                   "标普500":"SPY","恐慌指数":"VIXY"}.items()):
+for i, (name, sym) in enumerate(indices.items()):
     with idx_cols[i]:
         try:
-            q = fetch_quote(sym)
-            price = fv(q, "05. price")
-            chg   = fv(q, "10. change percent", "0%")
-            if isinstance(chg, str): chg = float(chg.replace("%",""))
+            q = fetch_quote_full(sym)
+            price = fv(q, "close")
+            chg   = fv(q, "percent_change")
             sign  = "+" if (chg or 0) >= 0 else ""
             st.metric(name, f"${price:.2f}" if price else "N/A",
                       f"{sign}{chg:.2f}%" if chg else None)
@@ -277,8 +295,8 @@ st.divider()
 alerts = load_json(ALERTS_FILE, {})
 for sym, rule in alerts.items():
     try:
-        q = fetch_quote(sym)
-        price = fv(q, "05. price")
+        q = fetch_quote_full(sym)
+        price = fv(q, "close")
         if price:
             if rule.get("high") and price >= rule["high"]:
                 st.warning(f"🔔 {sym} 已达目标价 ${rule['high']} (现价 ${price:.2f})")
@@ -295,13 +313,12 @@ if not query:
         for i, sym in enumerate(wl):
             with cols[i % 4]:
                 try:
-                    q = fetch_quote(sym)
-                    price = fv(q, "05. price")
-                    chg_str = q.get("10. change percent","0%")
-                    chg = float(chg_str.replace("%","")) if isinstance(chg_str,str) else 0
-                    sign = "+" if chg >= 0 else ""
+                    q = fetch_quote_full(sym)
+                    price = fv(q, "close")
+                    chg   = fv(q, "percent_change")
+                    sign  = "+" if (chg or 0) >= 0 else ""
                     st.metric(sym, f"${price:.2f}" if price else "N/A",
-                              f"{sign}{chg:.2f}%")
+                              f"{sign}{chg:.2f}%" if chg else None)
                 except Exception:
                     st.metric(sym, "获取失败")
 
@@ -310,9 +327,10 @@ if not query:
             try:
                 closes = {}
                 for sym in wl:
-                    h = fetch_history(sym, "full")
-                    if not h.empty: closes[sym] = h["Close"].tail(365)
-                if closes:
+                    h = fetch_history(sym)
+                    if not h.empty and "Close" in h.columns:
+                        closes[sym] = h["Close"].tail(365)
+                if len(closes) >= 2:
                     df_c = pd.DataFrame(closes).dropna()
                     corr = df_c.corr()
                     fig_corr = px.imshow(corr, text_auto=".2f",
@@ -328,30 +346,28 @@ if not query:
 
 # ── 股票详情 ──────────────────────────────────
 with st.spinner(f"正在获取 {query} 数据..."):
-    quote    = fetch_quote(query)
-    overview = fetch_overview(query)
+    quote    = fetch_quote_full(query)
+    profile  = fetch_profile(query)
+    stats    = fetch_statistics(query)
 
-if not quote.get("01. symbol"):
-    st.error(f"未找到股票代码：{query}，请检查代码是否正确。")
+if not quote or quote.get("status") == "error" or not quote.get("symbol"):
+    st.error(f"未找到股票代码：{query}")
     st.stop()
 
-price   = fv(quote, "05. price")
-prev    = fv(quote, "08. previous close")
-chg_str = quote.get("10. change percent","0%")
-try: chg_pct = float(chg_str.replace("%",""))
-except: chg_pct = 0
-sign = "+" if chg_pct >= 0 else ""
+price   = fv(quote, "close")
+chg_pct = fv(quote, "percent_change")
+sign    = "+" if (chg_pct or 0) >= 0 else ""
 
-st.title(f"{overview.get('Name', query)}  `{query}`")
-st.caption(f"{overview.get('Sector','')}  ·  {overview.get('Industry','')}")
+st.title(f"{quote.get('name', query)}  `{query}`")
+st.caption(f"{profile.get('sector','')}  ·  {profile.get('industry','')}")
 
 c1,c2,c3,c4,c5 = st.columns(5)
 c1.metric("当前价格", f"${price:.2f}" if price else "N/A",
-          f"{sign}{chg_pct:.2f}%")
-c2.metric("今日区间", f"${quote.get('04. low','?')} ~ ${quote.get('03. high','?')}")
-c3.metric("52周区间", f"${overview.get('52WeekLow','?')} ~ ${overview.get('52WeekHigh','?')}")
-c4.metric("成交量",   fmt(fv(quote,"06. volume")))
-c5.metric("市值",     fmt(fv(overview,"MarketCapitalization")))
+          f"{sign}{chg_pct:.2f}%" if chg_pct else None)
+c2.metric("今日区间",  f"${fv(quote,'low') or '?'} ~ ${fv(quote,'high') or '?'}")
+c3.metric("52周区间", f"${fv(quote,'fifty_two_week','{}'  ).get('low','?') if isinstance(quote.get('fifty_two_week'),dict) else '?'} ~ ${fv(quote,'fifty_two_week',{}).get('high','?') if isinstance(quote.get('fifty_two_week'),dict) else '?'}")
+c4.metric("成交量",   fmt(fv(quote,"volume")))
+c5.metric("市值",     fmt(fv(stats.get("valuations_metrics",{}),"market_capitalization")))
 
 st.divider()
 
@@ -367,8 +383,8 @@ tabs = st.tabs([
 # ── K线走势 ───────────────────────────────────
 with tab_chart:
     days = period_days[period_label]
-    hist = fetch_history(query, period_map[period_label])
-    if not hist.empty:
+    hist = fetch_history(query)
+    if not hist.empty and "Close" in hist.columns:
         hist = hist.tail(days)
         hist["MA20"] = hist["Close"].rolling(20).mean()
         hist["MA60"] = hist["Close"].rolling(60).mean()
@@ -399,12 +415,14 @@ with tab_chart:
                            data=to_excel({"K线数据": hist.reset_index()}),
                            file_name=f"{query}_kline.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        st.warning("历史数据获取失败")
 
 # ── 技术指标 ──────────────────────────────────
 with tab_tech:
     days = period_days[period_label]
-    hist = fetch_history(query, period_map[period_label])
-    if not hist.empty:
+    hist = fetch_history(query)
+    if not hist.empty and "Close" in hist.columns:
         hist = hist.tail(days)
         close = hist["Close"]
         mid, upper, lower = calc_boll(close)
@@ -448,45 +466,46 @@ with tab_tech:
 
 # ── 基本面 ────────────────────────────────────
 with tab_fund:
+    vs = stats.get("valuations_metrics", {})
+    fm = stats.get("financials", {})
+    bs = stats.get("balance_sheet", {})
+
     cl, cr = st.columns(2)
     with cl:
         st.subheader("估值指标")
         st.table(pd.DataFrame({
-            "市盈率 PE":    overview.get("PERatio","N/A"),
-            "前瞻PE":      overview.get("ForwardPE","N/A"),
-            "市净率 PB":    overview.get("PriceToBookRatio","N/A"),
-            "市销率 PS":    overview.get("PriceToSalesRatioTTM","N/A"),
-            "每股收益 EPS":  overview.get("EPS","N/A"),
-            "Beta":        overview.get("Beta","N/A"),
+            "市盈率 PE(TTM)": vs.get("trailing_pe","N/A"),
+            "前瞻PE":        vs.get("forward_pe","N/A"),
+            "市净率 PB":     vs.get("price_to_book_mrq","N/A"),
+            "市销率 PS":     vs.get("price_to_sales_ttm","N/A"),
+            "每股收益 EPS":   vs.get("earnings_per_share","N/A"),
+            "Beta":         stats.get("stock_statistics",{}).get("beta","N/A"),
         }.items(), columns=["指标","数值"]).set_index("指标"))
 
         st.subheader("分析师目标价")
-        tp = overview.get("AnalystTargetPrice")
-        rating = overview.get("AnalystRatingStrongBuy","")
-        if tp:
-            upside = ((float(tp)-price)/price*100) if price and tp else None
-            st.metric("目标价", f"${float(tp):.2f}")
-            if upside: st.metric("潜在涨幅", f"{'+'if upside>=0 else ''}{upside:.1f}%")
+        tp = vs.get("forward_pe")
+        price_target = stats.get("stock_price_summary",{}).get("target_price")
+        if price_target:
+            st.metric("目标价", f"${float(price_target):.2f}")
+            if price:
+                upside = (float(price_target)-price)/price*100
+                st.metric("潜在涨幅", f"{'+'if upside>=0 else ''}{upside:.1f}%")
 
     with cr:
         st.subheader("盈利能力")
         st.table(pd.DataFrame({
-            "毛利率":    fmt_pct(fv(overview,"GrossProfitTTM") and fv(overview,"RevenueTTM") and
-                               fv(overview,"GrossProfitTTM")/fv(overview,"RevenueTTM")),
-            "净利率":    overview.get("ProfitMargin","N/A"),
-            "营业利润率": overview.get("OperatingMarginTTM","N/A"),
-            "ROE":     overview.get("ReturnOnEquityTTM","N/A"),
-            "ROA":     overview.get("ReturnOnAssetsTTM","N/A"),
+            "毛利率":    f"{fv(fm,'gross_margin_ttm'):.1f}%" if fv(fm,'gross_margin_ttm') else "N/A",
+            "营业利润率": f"{fv(fm,'operating_margin_ttm'):.1f}%" if fv(fm,'operating_margin_ttm') else "N/A",
+            "净利率":    f"{fv(fm,'net_profit_margin_ttm'):.1f}%" if fv(fm,'net_profit_margin_ttm') else "N/A",
+            "ROE":     f"{fv(fm,'return_on_equity_ttm'):.1f}%" if fv(fm,'return_on_equity_ttm') else "N/A",
+            "ROA":     f"{fv(fm,'return_on_assets_ttm'):.1f}%" if fv(fm,'return_on_assets_ttm') else "N/A",
         }.items(), columns=["指标","数值"]).set_index("指标"))
 
-        st.subheader("股息 & 财务")
+        st.subheader("财务健康")
         st.table(pd.DataFrame({
-            "股息率":   overview.get("DividendYield","N/A"),
-            "每股股息":  overview.get("DividendPerShare","N/A"),
-            "负债权益比": overview.get("DebtToEquityRatio","N/A"),
-            "流动比率":  overview.get("CurrentRatio","N/A"),
-            "52周高":   overview.get("52WeekHigh","N/A"),
-            "52周低":   overview.get("52WeekLow","N/A"),
+            "负债权益比": f"{fv(bs,'total_debt_to_equity_mrq'):.1f}%" if fv(bs,'total_debt_to_equity_mrq') else "N/A",
+            "流动比率":  f"{fv(bs,'current_ratio_mrq'):.2f}" if fv(bs,'current_ratio_mrq') else "N/A",
+            "营收增速":  f"{fv(fm,'revenue_growth_ttm_yoy'):.1f}%" if fv(fm,'revenue_growth_ttm_yoy') else "N/A",
         }.items(), columns=["指标","数值"]).set_index("指标"))
 
 # ── 评分 ─────────────────────────────────────
@@ -494,14 +513,14 @@ with tab_score:
     sc1, sc2 = st.columns(2)
     with sc1:
         st.subheader("估值评分")
-        vs, v_det = valuation_score(overview)
-        color_v = score_color(vs)
-        fig_g = go.Figure(go.Indicator(mode="gauge+number", value=vs,
+        vs_score, v_det = valuation_score(stats)
+        color_v = score_color(vs_score)
+        fig_g = go.Figure(go.Indicator(mode="gauge+number", value=vs_score,
             gauge={"axis":{"range":[0,10]},"bar":{"color":color_v},
                    "steps":[{"range":[0,4],"color":"#fde8e8"},
                              {"range":[4,7],"color":"#fef9e7"},
-                             {"range":[7,10],"color":"#e8f8f5"}]}))
-        fig_g.update_layout(height=200,margin=dict(l=20,r=20,t=10,b=10),
+                             {"range":[7,10],"color":"#e8f8f5"}]}})
+        fig_g.update_layout(height=200, margin=dict(l=20,r=20,t=10,b=10),
                              paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_g, use_container_width=True, key="gauge_valuation")
         for desc,pts in v_det:
@@ -509,14 +528,14 @@ with tab_score:
 
     with sc2:
         st.subheader("财务健康评分")
-        hs, h_det = health_score(overview)
+        hs, h_det = health_score(stats)
         color_h = score_color(hs)
         fig_g2 = go.Figure(go.Indicator(mode="gauge+number", value=hs,
             gauge={"axis":{"range":[0,10]},"bar":{"color":color_h},
                    "steps":[{"range":[0,4],"color":"#fde8e8"},
                              {"range":[4,7],"color":"#fef9e7"},
-                             {"range":[7,10],"color":"#e8f8f5"}]}))
-        fig_g2.update_layout(height=200,margin=dict(l=20,r=20,t=10,b=10),
+                             {"range":[7,10],"color":"#e8f8f5"}]}})
+        fig_g2.update_layout(height=200, margin=dict(l=20,r=20,t=10,b=10),
                               paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_g2, use_container_width=True, key="gauge_health")
         for desc,pts in h_det:
@@ -534,19 +553,20 @@ with tab_peer:
         rows = []
         for sym in symbols:
             try:
-                q  = fetch_quote(sym)
-                ov = fetch_overview(sym)
-                p  = fv(q,"05. price")
-                chg_s = q.get("10. change percent","0%")
-                chg = float(chg_s.replace("%","")) if isinstance(chg_s,str) else 0
+                q  = fetch_quote_full(sym)
+                st2 = fetch_statistics(sym)
+                p   = fv(q,"close")
+                chg = fv(q,"percent_change")
+                vs2 = st2.get("valuations_metrics",{})
+                fm2 = st2.get("financials",{})
                 rows.append({
                     "股票": sym,
                     "价格": f"${p:.2f}" if p else "N/A",
-                    "涨跌幅": f"{'+'if chg>=0 else ''}{chg:.2f}%",
-                    "市值": fmt(fv(ov,"MarketCapitalization")),
-                    "PE":  ov.get("PERatio","N/A"),
-                    "净利率": ov.get("ProfitMargin","N/A"),
-                    "ROE": ov.get("ReturnOnEquityTTM","N/A"),
+                    "涨跌幅": f"{'+'if(chg or 0)>=0 else ''}{chg:.2f}%" if chg else "N/A",
+                    "市值": fmt(fv(vs2,"market_capitalization")),
+                    "PE":  f"{fv(vs2,'trailing_pe'):.1f}" if fv(vs2,'trailing_pe') else "N/A",
+                    "净利率": f"{fv(fm2,'net_profit_margin_ttm'):.1f}%" if fv(fm2,'net_profit_margin_ttm') else "N/A",
+                    "ROE": f"{fv(fm2,'return_on_equity_ttm'):.1f}%" if fv(fm2,'return_on_equity_ttm') else "N/A",
                 })
             except Exception:
                 rows.append({"股票":sym,"价格":"获取失败"})
@@ -566,17 +586,19 @@ with tab_corr:
     corr_syms = list(dict.fromkeys([s.upper() for s in corr_input.split() if s]))[:6]
 
     if len(corr_syms) >= 2:
-        closes = {}
-        for sym in corr_syms:
-            h = fetch_history(sym, "full")
-            if not h.empty: closes[sym] = h["Close"].tail(365)
-        if closes:
+        with st.spinner("加载历史数据..."):
+            closes = {}
+            for sym in corr_syms:
+                h = fetch_history(sym)
+                if not h.empty and "Close" in h.columns:
+                    closes[sym] = h["Close"].tail(365)
+        if len(closes) >= 2:
             df_c = pd.DataFrame(closes).dropna()
             corr = df_c.corr()
-            fig_corr = px.imshow(corr,text_auto=".2f",
-                                  color_continuous_scale="RdYlGn",zmin=-1,zmax=1,
+            fig_corr = px.imshow(corr, text_auto=".2f",
+                                  color_continuous_scale="RdYlGn", zmin=-1, zmax=1,
                                   title="1年价格相关性")
-            fig_corr.update_layout(height=400,margin=dict(l=0,r=0,t=40,b=0),
+            fig_corr.update_layout(height=400, margin=dict(l=0,r=0,t=40,b=0),
                                     paper_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_corr, use_container_width=True)
             st.caption("1=完全同向  0=无关  -1=完全反向")
@@ -585,9 +607,9 @@ with tab_corr:
             fig_norm = go.Figure()
             for col in df_norm.columns:
                 fig_norm.add_trace(go.Scatter(x=df_norm.index,y=df_norm[col],name=col))
-            fig_norm.update_layout(title="归一化走势对比（基准=100）",height=350,
+            fig_norm.update_layout(title="归一化走势对比（基准=100）", height=350,
                                     margin=dict(l=0,r=0,t=40,b=0),
-                                    paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)")
+                                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_norm, use_container_width=True)
 
 # ── 财报 ─────────────────────────────────────
@@ -597,29 +619,32 @@ with tab_fin:
 
     if not income_df.empty:
         st.subheader("年度利润表")
-        inc_cols = {"fiscalDateEnding":"年度","totalRevenue":"营收",
-                    "grossProfit":"毛利润","operatingIncome":"营业利润","netIncome":"净利润"}
-        df_i = income_df[[c for c in inc_cols if c in income_df.columns]].head(5).copy()
-        df_i.rename(columns=inc_cols, inplace=True)
+        inc_map = {"fiscal_date":"年度","revenue":"营收","gross_profit":"毛利润",
+                   "operating_income":"营业利润","net_income":"净利润"}
+        df_i = income_df[[c for c in inc_map if c in income_df.columns]].head(5).copy()
+        df_i.rename(columns=inc_map, inplace=True)
         for col in ["营收","毛利润","营业利润","净利润"]:
             if col in df_i.columns:
-                df_i[col] = df_i[col].apply(lambda x: fmt(float(x)) if x not in ("None","N/A","") else "N/A")
-        st.dataframe(df_i.set_index("年度"), use_container_width=True)
+                df_i[col] = df_i[col].apply(lambda x: fmt(x))
+        if "年度" in df_i.columns:
+            st.dataframe(df_i.set_index("年度"), use_container_width=True)
+        else:
+            st.dataframe(df_i, use_container_width=True)
 
         try:
-            plot_df = income_df[["fiscalDateEnding","totalRevenue","netIncome"]].head(8)[::-1]
-            plot_df["totalRevenue"] = pd.to_numeric(plot_df["totalRevenue"], errors="coerce")
-            plot_df["netIncome"]    = pd.to_numeric(plot_df["netIncome"],    errors="coerce")
+            plot_df = income_df[["fiscal_date","revenue","net_income"]].head(8)[::-1].copy()
+            plot_df["revenue"]    = pd.to_numeric(plot_df["revenue"],    errors="coerce")
+            plot_df["net_income"] = pd.to_numeric(plot_df["net_income"], errors="coerce")
             fig_inc = go.Figure()
-            fig_inc.add_trace(go.Bar(x=plot_df["fiscalDateEnding"].str[:4],
-                                      y=plot_df["totalRevenue"]/1e9,
+            fig_inc.add_trace(go.Bar(x=plot_df["fiscal_date"].astype(str).str[:4],
+                                      y=plot_df["revenue"]/1e9,
                                       name="营收(B)", marker_color="#3498db"))
-            fig_inc.add_trace(go.Bar(x=plot_df["fiscalDateEnding"].str[:4],
-                                      y=plot_df["netIncome"]/1e9,
+            fig_inc.add_trace(go.Bar(x=plot_df["fiscal_date"].astype(str).str[:4],
+                                      y=plot_df["net_income"]/1e9,
                                       name="净利润(B)", marker_color="#26a69a"))
-            fig_inc.update_layout(barmode="group",height=300,yaxis_title="十亿美元",
+            fig_inc.update_layout(barmode="group", height=300, yaxis_title="十亿美元",
                                    margin=dict(l=0,r=0,t=10,b=0),
-                                   paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)")
+                                   paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_inc, use_container_width=True)
         except Exception:
             pass
@@ -631,15 +656,18 @@ with tab_fin:
 
     if not balance_df.empty:
         st.subheader("年度资产负债表")
-        bal_cols = {"fiscalDateEnding":"年度","totalAssets":"总资产",
-                    "totalLiabilities":"总负债","totalShareholderEquity":"股东权益",
-                    "cashAndCashEquivalentsAtCarryingValue":"现金"}
-        df_b = balance_df[[c for c in bal_cols if c in balance_df.columns]].head(5).copy()
-        df_b.rename(columns=bal_cols, inplace=True)
+        bal_map = {"fiscal_date":"年度","total_assets":"总资产",
+                   "total_liabilities":"总负债","shareholders_equity":"股东权益",
+                   "cash_and_equivalents":"现金"}
+        df_b = balance_df[[c for c in bal_map if c in balance_df.columns]].head(5).copy()
+        df_b.rename(columns=bal_map, inplace=True)
         for col in ["总资产","总负债","股东权益","现金"]:
             if col in df_b.columns:
-                df_b[col] = df_b[col].apply(lambda x: fmt(float(x)) if x not in ("None","N/A","") else "N/A")
-        st.dataframe(df_b.set_index("年度"), use_container_width=True)
+                df_b[col] = df_b[col].apply(lambda x: fmt(x))
+        if "年度" in df_b.columns:
+            st.dataframe(df_b.set_index("年度"), use_container_width=True)
+        else:
+            st.dataframe(df_b, use_container_width=True)
 
 # ── 投资组合 ──────────────────────────────────
 with tab_port:
@@ -660,8 +688,8 @@ with tab_port:
         rows_p,total_cost,total_val=[],0,0
         for sym,pos in portfolio.items():
             try:
-                q = fetch_quote(sym)
-                p = fv(q,"05. price") or pos["cost"]
+                q = fetch_quote_full(sym)
+                p = fv(q,"close") or pos["cost"]
                 ct=pos["qty"]*pos["cost"]; vt=pos["qty"]*p
                 pnl=vt-ct; pnl_pct=(pnl/ct*100) if ct else 0
                 total_cost+=ct; total_val+=vt
@@ -738,18 +766,15 @@ with tab_news:
         for item in news_items:
             title = item.get("title","")
             url   = item.get("url","")
-            pub   = item.get("time_published","")[:8]
-            if pub: pub = f"{pub[:4]}/{pub[4:6]}/{pub[6:8]}"
-            sentiment = item.get("overall_sentiment_label","")
-            badge = {"Bullish":"🟢","Somewhat-Bullish":"🟡","Neutral":"⚪",
-                     "Somewhat-Bearish":"🟠","Bearish":"🔴"}.get(sentiment,"")
+            pub   = item.get("datetime","")[:10]
+            source = item.get("source","")
             if url:
-                st.markdown(f"{badge} **[{title}]({url})**  "
-                            f"<span style='color:#888;font-size:12px'>{pub}</span>",
+                st.markdown(f"**[{title}]({url})**  "
+                            f"<span style='color:#888;font-size:12px'>{pub} · {source}</span>",
                             unsafe_allow_html=True)
             else:
-                st.markdown(f"{badge} **{title}**  "
-                            f"<span style='color:#888;font-size:12px'>{pub}</span>",
+                st.markdown(f"**{title}**  "
+                            f"<span style='color:#888;font-size:12px'>{pub} · {source}</span>",
                             unsafe_allow_html=True)
             st.divider()
     else:
