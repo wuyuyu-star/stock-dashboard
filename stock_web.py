@@ -114,6 +114,10 @@ def fetch_quote_full(symbol):
     return td_get("/quote", {"symbol": symbol})
 
 @st.cache_data(ttl=300, show_spinner=False)
+def fetch_quote_index(symbol):
+    return td_get("/quote", {"symbol": symbol})
+
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_profile(symbol):
     return td_get("/profile", {"symbol": symbol})
 
@@ -332,7 +336,7 @@ idx_cols = st.columns(4)
 for i, (name, sym) in enumerate(indices.items()):
     with idx_cols[i]:
         try:
-            q = fetch_quote_full(sym)
+            q = fetch_quote_index(sym)
             price = fv(q, "close")
             chg   = fv(q, "percent_change")
             sign  = "+" if (chg or 0) >= 0 else ""
