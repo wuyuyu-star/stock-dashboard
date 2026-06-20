@@ -519,7 +519,7 @@ with tab_score:
             gauge={"axis":{"range":[0,10]},"bar":{"color":color_v},
                    "steps":[{"range":[0,4],"color":"#fde8e8"},
                              {"range":[4,7],"color":"#fef9e7"},
-                             {"range":[7,10],"color":"#e8f8f5"}]}})
+                             {"range":[7,10],"color":"#e8f8f5"}]}))
         fig_g.update_layout(height=200, margin=dict(l=20,r=20,t=10,b=10),
                              paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_g, use_container_width=True, key="gauge_valuation")
@@ -534,7 +534,7 @@ with tab_score:
             gauge={"axis":{"range":[0,10]},"bar":{"color":color_h},
                    "steps":[{"range":[0,4],"color":"#fde8e8"},
                              {"range":[4,7],"color":"#fef9e7"},
-                             {"range":[7,10],"color":"#e8f8f5"}]}})
+                             {"range":[7,10],"color":"#e8f8f5"}]}))
         fig_g2.update_layout(height=200, margin=dict(l=20,r=20,t=10,b=10),
                               paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_g2, use_container_width=True, key="gauge_health")
