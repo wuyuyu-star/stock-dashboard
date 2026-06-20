@@ -365,7 +365,9 @@ c1,c2,c3,c4,c5 = st.columns(5)
 c1.metric("当前价格", f"${price:.2f}" if price else "N/A",
           f"{sign}{chg_pct:.2f}%" if chg_pct else None)
 c2.metric("今日区间",  f"${fv(quote,'low') or '?'} ~ ${fv(quote,'high') or '?'}")
-c3.metric("52周区间", f"${fv(quote,'fifty_two_week','{}'  ).get('low','?') if isinstance(quote.get('fifty_two_week'),dict) else '?'} ~ ${fv(quote,'fifty_two_week',{}).get('high','?') if isinstance(quote.get('fifty_two_week'),dict) else '?'}")
+_52w = quote.get("fifty_two_week", {})
+_52w = _52w if isinstance(_52w, dict) else {}
+c3.metric("52周区间", f"${_52w.get('low','?')} ~ ${_52w.get('high','?')}")
 c4.metric("成交量",   fmt(fv(quote,"volume")))
 c5.metric("市值",     fmt(fv(stats.get("valuations_metrics",{}),"market_capitalization")))
 
