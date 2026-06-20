@@ -117,7 +117,36 @@ def fetch_profile(symbol):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_statistics(symbol):
-    return td_get("/statistics", {"symbol": symbol})
+    raw = td_get("/statistics", {"symbol": symbol})
+    s = raw.get("statistics", {})
+    vm  = s.get("valuations_metrics", {})
+    fin = s.get("financials", {})
+    inc = fin.get("income_statement", {})
+    bs  = fin.get("balance_sheet", {})
+    cf  = fin.get("cash_flow", {})
+    sp  = s.get("stock_price_summary", {})
+    # flatten into a single dict for easy access
+    return {
+        "market_cap":        vm.get("market_capitalization"),
+        "trailing_pe":       vm.get("trailing_pe"),
+        "forward_pe":        vm.get("forward_pe"),
+        "price_to_book":     vm.get("price_to_book_mrq"),
+        "price_to_sales":    vm.get("price_to_sales_ttm"),
+        "eps":               inc.get("diluted_eps_ttm"),
+        "beta":              sp.get("beta"),
+        "gross_margin":      fin.get("gross_margin"),
+        "operating_margin":  fin.get("operating_margin"),
+        "profit_margin":     fin.get("profit_margin"),
+        "roe":               fin.get("return_on_equity_ttm"),
+        "roa":               fin.get("return_on_assets_ttm"),
+        "debt_to_equity":    bs.get("total_debt_to_equity_mrq"),
+        "current_ratio":     bs.get("current_ratio_mrq"),
+        "revenue_growth":    inc.get("quarterly_revenue_growth"),
+        "free_cash_flow":    cf.get("levered_free_cash_flow_ttm"),
+        "target_price":      None,
+        "52w_low":           sp.get("fifty_two_week_low"),
+        "52w_high":          sp.get("fifty_two_week_high"),
+    }
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_history(symbol, period="1year"):
@@ -181,24 +210,30 @@ def calc_boll(series, period=20, std=2):
 
 def valuation_score(stats):
     score, details = 0, []
-    vs = stats.get("valuations_metrics", {})
-    pe = fv(vs, "trailing_pe")
+    pe = stats.get("trailing_pe")
+    try: pe = float(pe)
+    except: pe = None
     if pe and pe > 0:
         if pe < 15:   score+=2; details.append(("PE < 15，估值偏低","+2"))
         elif pe < 25: score+=1; details.append((f"PE {pe:.1f}，估值合理","+1"))
         else:         details.append((f"PE {pe:.1f}，估值偏高","0"))
-    pb = fv(vs, "price_to_book_mrq")
+    pb = stats.get("price_to_book")
+    try: pb = float(pb)
+    except: pb = None
     if pb and pb > 0:
         if pb < 1:   score+=2; details.append(("PB < 1，低于净资产","+2"))
         elif pb < 3: score+=1; details.append(("PB 1~3，合理","+1"))
         else:        details.append((f"PB {pb:.1f}，溢价较高","0"))
-    fm = stats.get("financials", {})
-    roe = fv(fm, "return_on_equity_ttm")
+    roe = stats.get("roe")
+    try: roe = float(roe)*100
+    except: roe = None
     if roe:
         if roe > 20:  score+=2; details.append(("ROE > 20%，盈利能力强","+2"))
         elif roe > 10: score+=1; details.append(("ROE 10~20%","+1"))
         else:          details.append(("ROE < 10%，盈利能力弱","0"))
-    pm = fv(fm, "net_profit_margin_ttm")
+    pm = stats.get("profit_margin")
+    try: pm = float(pm)*100
+    except: pm = None
     if pm:
         if pm > 20:  score+=2; details.append(("净利率 > 20%","+2"))
         elif pm > 10: score+=1; details.append(("净利率 10~20%","+1"))
@@ -207,23 +242,29 @@ def valuation_score(stats):
 
 def health_score(stats):
     score, details = 0, []
-    fm = stats.get("financials", {})
-    bs = stats.get("balance_sheet", {})
-    de = fv(bs, "total_debt_to_equity_mrq")
+    de = stats.get("debt_to_equity")
+    try: de = float(de)
+    except: de = None
     if de is not None:
         if de < 50:   score+=2; details.append(("负债权益比 < 50%，财务稳健","+2"))
         elif de < 100: score+=1; details.append(("负债权益比 50~100%，一般","+1"))
         else:          details.append((f"负债权益比 {de:.0f}%，杠杆较高","0"))
-    cr = fv(bs, "current_ratio_mrq")
+    cr = stats.get("current_ratio")
+    try: cr = float(cr)
+    except: cr = None
     if cr:
         if cr > 2:   score+=2; details.append(("流动比率 > 2，短期偿债能力强","+2"))
         elif cr > 1: score+=1; details.append(("流动比率 1~2，可接受","+1"))
         else:        details.append(("流动比率 < 1，短期流动性风险","0"))
-    fcf = fv(fm, "free_cash_flow_ttm")
+    fcf = stats.get("free_cash_flow")
+    try: fcf = float(fcf)
+    except: fcf = None
     if fcf:
         if fcf > 0: score+=2; details.append(("自由现金流为正","+2"))
         else:       details.append(("自由现金流为负","0"))
-    rg = fv(fm, "revenue_growth_ttm_yoy")
+    rg = stats.get("revenue_growth")
+    try: rg = float(rg)*100
+    except: rg = None
     if rg is not None:
         if rg > 15:  score+=2; details.append(("营收增速 > 15%","+2"))
         elif rg > 5:  score+=1; details.append(("营收增速 5~15%","+1"))
@@ -275,8 +316,8 @@ if is_market_open():
 
 # ── 大盘概览 ──────────────────────────────────
 st.subheader("大盘概览")
-indices = {"道琼斯":"DIA","纳斯达克":"QQQ","标普500":"SPY","恐慌指数":"VIXY"}
-idx_cols = st.columns(4)
+indices = {"纳斯达克":"QQQ","标普500":"SPY"}
+idx_cols = st.columns(2)
 for i, (name, sym) in enumerate(indices.items()):
     with idx_cols[i]:
         try:
@@ -354,6 +395,9 @@ if not quote or quote.get("status") == "error" or not quote.get("symbol"):
     st.error(f"未找到股票代码：{query}")
     st.stop()
 
+with st.expander("🔧 调试信息（排查完可删除）"):
+    st.write("statistics raw:", td_get("/statistics", {"symbol": query}))
+
 price   = fv(quote, "close")
 chg_pct = fv(quote, "percent_change")
 sign    = "+" if (chg_pct or 0) >= 0 else ""
@@ -365,11 +409,11 @@ c1,c2,c3,c4,c5 = st.columns(5)
 c1.metric("当前价格", f"${price:.2f}" if price else "N/A",
           f"{sign}{chg_pct:.2f}%" if chg_pct else None)
 c2.metric("今日区间",  f"${fv(quote,'low') or '?'} ~ ${fv(quote,'high') or '?'}")
-_52w = quote.get("fifty_two_week", {})
-_52w = _52w if isinstance(_52w, dict) else {}
-c3.metric("52周区间", f"${_52w.get('low','?')} ~ ${_52w.get('high','?')}")
+_52l = stats.get("52w_low") or "?"
+_52h = stats.get("52w_high") or "?"
+c3.metric("52周区间", f"${_52l} ~ ${_52h}")
 c4.metric("成交量",   fmt(fv(quote,"volume")))
-c5.metric("市值",     fmt(fv(stats.get("valuations_metrics",{}),"market_capitalization")))
+c5.metric("市值",     fmt(stats.get("market_cap")))
 
 st.divider()
 
@@ -468,46 +512,40 @@ with tab_tech:
 
 # ── 基本面 ────────────────────────────────────
 with tab_fund:
-    vs = stats.get("valuations_metrics", {})
-    fm = stats.get("financials", {})
-    bs = stats.get("balance_sheet", {})
+    def _pct(key, mult=100):
+        v = stats.get(key)
+        return f"{float(v)*mult:.1f}%" if v not in (None,"N/A") else "N/A"
+    def _val(key, fmt_str="{:.2f}"):
+        v = stats.get(key)
+        return fmt_str.format(float(v)) if v not in (None,"N/A") else "N/A"
 
     cl, cr = st.columns(2)
     with cl:
         st.subheader("估值指标")
         st.table(pd.DataFrame({
-            "市盈率 PE(TTM)": vs.get("trailing_pe","N/A"),
-            "前瞻PE":        vs.get("forward_pe","N/A"),
-            "市净率 PB":     vs.get("price_to_book_mrq","N/A"),
-            "市销率 PS":     vs.get("price_to_sales_ttm","N/A"),
-            "每股收益 EPS":   vs.get("earnings_per_share","N/A"),
-            "Beta":         stats.get("stock_statistics",{}).get("beta","N/A"),
+            "市盈率 PE(TTM)": _val("trailing_pe"),
+            "前瞻PE":        _val("forward_pe"),
+            "市净率 PB":     _val("price_to_book"),
+            "市销率 PS":     _val("price_to_sales"),
+            "每股收益 EPS":   _val("eps", "${:.2f}"),
+            "Beta":         _val("beta"),
         }.items(), columns=["指标","数值"]).set_index("指标"))
-
-        st.subheader("分析师目标价")
-        tp = vs.get("forward_pe")
-        price_target = stats.get("stock_price_summary",{}).get("target_price")
-        if price_target:
-            st.metric("目标价", f"${float(price_target):.2f}")
-            if price:
-                upside = (float(price_target)-price)/price*100
-                st.metric("潜在涨幅", f"{'+'if upside>=0 else ''}{upside:.1f}%")
 
     with cr:
         st.subheader("盈利能力")
         st.table(pd.DataFrame({
-            "毛利率":    f"{fv(fm,'gross_margin_ttm'):.1f}%" if fv(fm,'gross_margin_ttm') else "N/A",
-            "营业利润率": f"{fv(fm,'operating_margin_ttm'):.1f}%" if fv(fm,'operating_margin_ttm') else "N/A",
-            "净利率":    f"{fv(fm,'net_profit_margin_ttm'):.1f}%" if fv(fm,'net_profit_margin_ttm') else "N/A",
-            "ROE":     f"{fv(fm,'return_on_equity_ttm'):.1f}%" if fv(fm,'return_on_equity_ttm') else "N/A",
-            "ROA":     f"{fv(fm,'return_on_assets_ttm'):.1f}%" if fv(fm,'return_on_assets_ttm') else "N/A",
+            "毛利率":    _pct("gross_margin"),
+            "营业利润率": _pct("operating_margin"),
+            "净利率":    _pct("profit_margin"),
+            "ROE":     _pct("roe"),
+            "ROA":     _pct("roa"),
         }.items(), columns=["指标","数值"]).set_index("指标"))
 
         st.subheader("财务健康")
         st.table(pd.DataFrame({
-            "负债权益比": f"{fv(bs,'total_debt_to_equity_mrq'):.1f}%" if fv(bs,'total_debt_to_equity_mrq') else "N/A",
-            "流动比率":  f"{fv(bs,'current_ratio_mrq'):.2f}" if fv(bs,'current_ratio_mrq') else "N/A",
-            "营收增速":  f"{fv(fm,'revenue_growth_ttm_yoy'):.1f}%" if fv(fm,'revenue_growth_ttm_yoy') else "N/A",
+            "负债权益比": _val("debt_to_equity", "{:.1f}%"),
+            "流动比率":  _val("current_ratio", "{:.2f}"),
+            "季度营收增速": _pct("revenue_growth"),
         }.items(), columns=["指标","数值"]).set_index("指标"))
 
 # ── 评分 ─────────────────────────────────────
@@ -559,16 +597,14 @@ with tab_peer:
                 st2 = fetch_statistics(sym)
                 p   = fv(q,"close")
                 chg = fv(q,"percent_change")
-                vs2 = st2.get("valuations_metrics",{})
-                fm2 = st2.get("financials",{})
                 rows.append({
                     "股票": sym,
                     "价格": f"${p:.2f}" if p else "N/A",
                     "涨跌幅": f"{'+'if(chg or 0)>=0 else ''}{chg:.2f}%" if chg else "N/A",
-                    "市值": fmt(fv(vs2,"market_capitalization")),
-                    "PE":  f"{fv(vs2,'trailing_pe'):.1f}" if fv(vs2,'trailing_pe') else "N/A",
-                    "净利率": f"{fv(fm2,'net_profit_margin_ttm'):.1f}%" if fv(fm2,'net_profit_margin_ttm') else "N/A",
-                    "ROE": f"{fv(fm2,'return_on_equity_ttm'):.1f}%" if fv(fm2,'return_on_equity_ttm') else "N/A",
+                    "市值": fmt(st2.get("market_cap")),
+                    "PE":  f"{float(st2['trailing_pe']):.1f}" if st2.get('trailing_pe') else "N/A",
+                    "净利率": f"{float(st2['profit_margin'])*100:.1f}%" if st2.get('profit_margin') else "N/A",
+                    "ROE": f"{float(st2['roe'])*100:.1f}%" if st2.get('roe') else "N/A",
                 })
             except Exception:
                 rows.append({"股票":sym,"价格":"获取失败"})
