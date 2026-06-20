@@ -10,9 +10,11 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import pandas as pd
 import requests
+import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
 warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "watchlist.json")
 PORTFOLIO_FILE = os.path.join(os.path.dirname(__file__), "portfolio.json")
@@ -115,38 +117,35 @@ def fetch_quote_full(symbol):
 def fetch_profile(symbol):
     return td_get("/profile", {"symbol": symbol})
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_statistics(symbol):
-    raw = td_get("/statistics", {"symbol": symbol})
-    s = raw.get("statistics", {})
-    vm  = s.get("valuations_metrics", {})
-    fin = s.get("financials", {})
-    inc = fin.get("income_statement", {})
-    bs  = fin.get("balance_sheet", {})
-    cf  = fin.get("cash_flow", {})
-    sp  = s.get("stock_price_summary", {})
-    # flatten into a single dict for easy access
-    return {
-        "market_cap":        vm.get("market_capitalization"),
-        "trailing_pe":       vm.get("trailing_pe"),
-        "forward_pe":        vm.get("forward_pe"),
-        "price_to_book":     vm.get("price_to_book_mrq"),
-        "price_to_sales":    vm.get("price_to_sales_ttm"),
-        "eps":               inc.get("diluted_eps_ttm"),
-        "beta":              sp.get("beta"),
-        "gross_margin":      fin.get("gross_margin"),
-        "operating_margin":  fin.get("operating_margin"),
-        "profit_margin":     fin.get("profit_margin"),
-        "roe":               fin.get("return_on_equity_ttm"),
-        "roa":               fin.get("return_on_assets_ttm"),
-        "debt_to_equity":    bs.get("total_debt_to_equity_mrq"),
-        "current_ratio":     bs.get("current_ratio_mrq"),
-        "revenue_growth":    inc.get("quarterly_revenue_growth"),
-        "free_cash_flow":    cf.get("levered_free_cash_flow_ttm"),
-        "target_price":      None,
-        "52w_low":           sp.get("fifty_two_week_low"),
-        "52w_high":          sp.get("fifty_two_week_high"),
-    }
+    try:
+        info = yf.Ticker(symbol).info
+        div = info.get("trailingAnnualDividendYield") or info.get("dividendYield") or 0
+        return {
+            "market_cap":       info.get("marketCap"),
+            "trailing_pe":      info.get("trailingPE"),
+            "forward_pe":       info.get("forwardPE"),
+            "price_to_book":    info.get("priceToBook"),
+            "price_to_sales":   info.get("priceToSalesTrailing12Months"),
+            "eps":              info.get("trailingEps"),
+            "beta":             info.get("beta"),
+            "gross_margin":     info.get("grossMargins"),
+            "operating_margin": info.get("operatingMargins"),
+            "profit_margin":    info.get("profitMargins"),
+            "roe":              info.get("returnOnEquity"),
+            "roa":              info.get("returnOnAssets"),
+            "debt_to_equity":   info.get("debtToEquity"),
+            "current_ratio":    info.get("currentRatio"),
+            "revenue_growth":   info.get("revenueGrowth"),
+            "free_cash_flow":   info.get("freeCashflow"),
+            "target_price":     info.get("targetMeanPrice"),
+            "dividend_yield":   div,
+            "52w_low":          info.get("fiftyTwoWeekLow"),
+            "52w_high":         info.get("fiftyTwoWeekHigh"),
+        }
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_history(symbol, period="1year"):
@@ -168,17 +167,29 @@ def fetch_history(symbol, period="1year"):
     df.columns = [c.capitalize() for c in df.columns]
     return df
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_income(symbol):
-    data = td_get("/income_statement", {"symbol": symbol})
-    reports = data.get("income_statement", [])
-    return pd.DataFrame(reports) if reports else pd.DataFrame()
+    try:
+        df = yf.Ticker(symbol).financials
+        if df is None or df.empty: return pd.DataFrame()
+        df = df.T.reset_index()
+        df.rename(columns={"index": "fiscal_date"}, inplace=True)
+        df["fiscal_date"] = pd.to_datetime(df["fiscal_date"]).dt.strftime("%Y-%m-%d")
+        return df
+    except Exception:
+        return pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_balance(symbol):
-    data = td_get("/balance_sheet", {"symbol": symbol})
-    reports = data.get("balance_sheet", [])
-    return pd.DataFrame(reports) if reports else pd.DataFrame()
+    try:
+        df = yf.Ticker(symbol).balance_sheet
+        if df is None or df.empty: return pd.DataFrame()
+        df = df.T.reset_index()
+        df.rename(columns={"index": "fiscal_date"}, inplace=True)
+        df["fiscal_date"] = pd.to_datetime(df["fiscal_date"]).dt.strftime("%Y-%m-%d")
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_news(symbol):
@@ -316,8 +327,8 @@ if is_market_open():
 
 # ── 大盘概览 ──────────────────────────────────
 st.subheader("大盘概览")
-indices = {"纳斯达克":"QQQ","标普500":"SPY"}
-idx_cols = st.columns(2)
+indices = {"道琼斯":"DIA","纳斯达克":"QQQ","标普500":"SPY","恐慌指数":"VIXY"}
+idx_cols = st.columns(4)
 for i, (name, sym) in enumerate(indices.items()):
     with idx_cols[i]:
         try:
@@ -395,8 +406,6 @@ if not quote or quote.get("status") == "error" or not quote.get("symbol"):
     st.error(f"未找到股票代码：{query}")
     st.stop()
 
-with st.expander("🔧 调试信息（排查完可删除）"):
-    st.write("statistics raw:", td_get("/statistics", {"symbol": query}))
 
 price   = fv(quote, "close")
 chg_pct = fv(quote, "percent_change")
@@ -657,8 +666,8 @@ with tab_fin:
 
     if not income_df.empty:
         st.subheader("年度利润表")
-        inc_map = {"fiscal_date":"年度","revenue":"营收","gross_profit":"毛利润",
-                   "operating_income":"营业利润","net_income":"净利润"}
+        inc_map = {"fiscal_date":"年度","Total Revenue":"营收","Gross Profit":"毛利润",
+                   "Operating Income":"营业利润","Net Income":"净利润"}
         df_i = income_df[[c for c in inc_map if c in income_df.columns]].head(5).copy()
         df_i.rename(columns=inc_map, inplace=True)
         for col in ["营收","毛利润","营业利润","净利润"]:
@@ -670,20 +679,23 @@ with tab_fin:
             st.dataframe(df_i, use_container_width=True)
 
         try:
-            plot_df = income_df[["fiscal_date","revenue","net_income"]].head(8)[::-1].copy()
-            plot_df["revenue"]    = pd.to_numeric(plot_df["revenue"],    errors="coerce")
-            plot_df["net_income"] = pd.to_numeric(plot_df["net_income"], errors="coerce")
-            fig_inc = go.Figure()
-            fig_inc.add_trace(go.Bar(x=plot_df["fiscal_date"].astype(str).str[:4],
-                                      y=plot_df["revenue"]/1e9,
-                                      name="营收(B)", marker_color="#3498db"))
-            fig_inc.add_trace(go.Bar(x=plot_df["fiscal_date"].astype(str).str[:4],
-                                      y=plot_df["net_income"]/1e9,
-                                      name="净利润(B)", marker_color="#26a69a"))
-            fig_inc.update_layout(barmode="group", height=300, yaxis_title="十亿美元",
-                                   margin=dict(l=0,r=0,t=10,b=0),
-                                   paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig_inc, use_container_width=True)
+            rev_col = "Total Revenue" if "Total Revenue" in income_df.columns else None
+            ni_col  = "Net Income"    if "Net Income"    in income_df.columns else None
+            if rev_col and ni_col:
+                plot_df = income_df[["fiscal_date", rev_col, ni_col]].head(8)[::-1].copy()
+                plot_df[rev_col] = pd.to_numeric(plot_df[rev_col], errors="coerce")
+                plot_df[ni_col]  = pd.to_numeric(plot_df[ni_col],  errors="coerce")
+                fig_inc = go.Figure()
+                fig_inc.add_trace(go.Bar(x=plot_df["fiscal_date"].astype(str).str[:4],
+                                          y=plot_df[rev_col]/1e9,
+                                          name="营收(B)", marker_color="#3498db"))
+                fig_inc.add_trace(go.Bar(x=plot_df["fiscal_date"].astype(str).str[:4],
+                                          y=plot_df[ni_col]/1e9,
+                                          name="净利润(B)", marker_color="#26a69a"))
+                fig_inc.update_layout(barmode="group", height=300, yaxis_title="十亿美元",
+                                       margin=dict(l=0,r=0,t=10,b=0),
+                                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_inc, use_container_width=True)
         except Exception:
             pass
 
@@ -694,9 +706,10 @@ with tab_fin:
 
     if not balance_df.empty:
         st.subheader("年度资产负债表")
-        bal_map = {"fiscal_date":"年度","total_assets":"总资产",
-                   "total_liabilities":"总负债","shareholders_equity":"股东权益",
-                   "cash_and_equivalents":"现金"}
+        bal_map = {"fiscal_date":"年度","Total Assets":"总资产",
+                   "Total Liabilities Net Minority Interest":"总负债",
+                   "Stockholders Equity":"股东权益",
+                   "Cash And Cash Equivalents":"现金"}
         df_b = balance_df[[c for c in bal_map if c in balance_df.columns]].head(5).copy()
         df_b.rename(columns=bal_map, inplace=True)
         for col in ["总资产","总负债","股东权益","现金"]:
