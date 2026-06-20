@@ -151,25 +151,20 @@ def fetch_statistics(symbol):
     except Exception:
         return {}
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_history(symbol, period="1year"):
-    period_map = {
-        "1mo": "1month", "3mo": "3month", "6mo": "6month",
-        "1year": "1year", "2year": "2year"
-    }
-    outputsize = 500
-    data = td_get("/time_series", {
-        "symbol": symbol, "interval": "1day",
-        "outputsize": outputsize, "order": "ASC"
-    })
-    if "values" not in data: return pd.DataFrame()
-    df = pd.DataFrame(data["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.set_index("datetime")
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df.columns = [c.capitalize() for c in df.columns]
-    return df
+    try:
+        period_map = {
+            "1mo": "1mo", "3mo": "3mo", "6mo": "6mo",
+            "1year": "1y", "2year": "2y"
+        }
+        yf_period = period_map.get(period, "1y")
+        df = yf.Ticker(symbol).history(period=yf_period)
+        if df.empty: return pd.DataFrame()
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        return df[["Open","High","Low","Close","Volume"]]
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_income(symbol):
