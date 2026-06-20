@@ -27,7 +27,7 @@ PEERS = {
     "NVDA": ["AMD", "INTC", "QCOM", "TSM"],
     "TSLA": ["GM", "F", "RIVN", "NIO"],
     "AMZN": ["MSFT", "GOOGL", "BABA", "JD"],
-    "META": ["GOOGL", "SNAP", "PINS", "TWTR"],
+    "META": ["GOOGL", "SNAP", "PINS", "RDDT"],
     "AMD":  ["NVDA", "INTC", "QCOM", "TSM"],
 }
 
